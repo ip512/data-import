@@ -2,7 +2,8 @@
 
 namespace Ddeboer\DataImport\Writer;
 
-use Doctrine\ORM\EntityManager;
+use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\EntityRepository;
 use Doctrine\ORM\Mapping\ClassMetadata;
 
 /**
@@ -18,7 +19,7 @@ class DoctrineWriter extends AbstractWriter
     /**
      * Doctrine entity manager
      *
-     * @var EntityManager
+     * @var EntityManagerInterface
      */
     protected $entityManager;
 
@@ -79,11 +80,11 @@ class DoctrineWriter extends AbstractWriter
     /**
      * Constructor
      *
-     * @param EntityManager $entityManager
-     * @param string        $entityName
-     * @param string|array        $index         Field or fields to find current entities by
+     * @param EntityManagerInterface $entityManager
+     * @param string $entityName
+     * @param string|array $index Field or fields to find current entities by
      */
-    public function __construct(EntityManager $entityManager, $entityName, $index = null)
+    public function __construct(EntityManagerInterface $entityManager, $entityName, $index = null)
     {
         $this->entityManager = $entityManager;
         $this->entityName = $entityName;
@@ -189,27 +190,28 @@ class DoctrineWriter extends AbstractWriter
     public function writeItem(array $item)
     {
         $this->counter++;
-        $entity = $this->findOrCreateItem($item);
+        $entity = null;
 
-        $this->loadAssociationObjectsToEntity($item, $entity);
-        $this->updateEntity($item, $entity);
-
-        $this->entityManager->persist($entity);
-
-        if (($this->counter % $this->batchSize) == 0) {
-            $this->flushAndClear();
+        // If the table was not truncated to begin with, find current entity
+        // first
+        if (false === $this->truncate) {
+            if ($this->lookupFields) {
+                $lookupConditions = array();
+                foreach($this->lookupFields as $fieldName) {
+                    $lookupConditions[$fieldName] = $item[$fieldName];
+                }
+                $entity = $this->entityRepository->findOneBy(
+                    $lookupConditions
+                );
+            } else {
+                $entity = $this->entityRepository->find(current($item));
+            }
         }
 
-        return $this;
-    }
+        if (!$entity) {
+            $entity = $this->getNewInstance();
+        }
 
-    /**
-     * 
-     * @param array $item
-     * @param object $entity
-     */
-    protected function updateEntity(array $item, $entity)
-    {
         $fieldNames = array_merge($this->entityMetadata->getFieldNames(), $this->entityMetadata->getAssociationNames());
         foreach ($fieldNames as $fieldName) {
 
@@ -230,32 +232,16 @@ class DoctrineWriter extends AbstractWriter
                 $setter = 'set' . ucfirst($fieldName);
                 $this->setValue($entity, $value, $setter);
             }
-        }        
-    }
-
-    /**
-     * Add the associated objects in case the item have for persist its relation
-     *
-     * @param array $item
-     * @param $entity
-     * @return void
-     */
-    protected function loadAssociationObjectsToEntity(array $item, $entity)
-    {
-        foreach ($this->entityMetadata->getAssociationMappings() as $associationMapping) {
-
-            $value = null;
-            if (isset($item[$associationMapping['fieldName']]) && !is_object($item[$associationMapping['fieldName']])) {
-                $value = $this->entityManager->getReference($associationMapping['targetEntity'], $item[$associationMapping['fieldName']]);
-            }
-
-            if (null === $value) {
-                continue;
-            }
-
-            $setter = 'set' . ucfirst($associationMapping['fieldName']);
-            $this->setValue($entity, $value, $setter);
         }
+
+        $this->entityManager->persist($entity);
+
+        if (($this->counter % $this->batchSize) == 0) {
+            $this->entityManager->flush();
+            $this->entityManager->clear($this->entityName);
+        }
+
+        return $this;
     }
 
     /**
@@ -266,7 +252,7 @@ class DoctrineWriter extends AbstractWriter
     {
         $tableName = $this->entityMetadata->table['name'];
         $connection = $this->entityManager->getConnection();
-        $query = $connection->getDatabasePlatform()->getTruncateTableSQL($tableName, true);
+        $query = $connection->getDatabasePlatform()->getTruncateTableSQL($tableName);
         $connection->executeQuery($query);
     }
 
@@ -287,40 +273,5 @@ class DoctrineWriter extends AbstractWriter
     {
         $config = $this->entityManager->getConnection()->getConfiguration();
         $config->setSQLLogger($this->originalLogger);
-    }
-
-    /**
-     * Finds existing entity or create a new instance
-     */
-    protected function findOrCreateItem(array $item)
-    {
-        $entity = null;
-        // If the table was not truncated to begin with, find current entity
-        // first
-        if (false === $this->truncate) {
-            if ($this->lookupFields) {
-                $lookupConditions = array();
-                foreach ($this->lookupFields as $fieldName) {
-                    $lookupConditions[$fieldName] = $item[$fieldName];
-                }
-                $entity = $this->entityRepository->findOneBy(
-                    $lookupConditions
-                );
-            } else {
-                $entity = $this->entityRepository->find(current($item));
-            }
-        }
-
-        if (!$entity) {
-            return $this->getNewInstance();
-        }
-
-        return $entity;
-    }
-    
-    protected function flushAndClear()
-    {
-        $this->entityManager->flush();
-        $this->entityManager->clear($this->entityName);
     }
 }
